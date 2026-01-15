@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Report Viewer</title>
+    <meta name="description" content="Render report.md" />
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+
+    <!-- GitHub-like markdown styling (CDN) -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown.min.css"
+    />
+
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar__inner">
+        <div class="brand">Report</div>
+      </div>
+    </header>
+
+    <main class="container">
+      <div id="status" class="status" hidden></div>
+      <article id="content" class="markdown-body content" aria-live="polite"></article>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer__inner">
+        <span>静态渲染：Markdown → HTML（浏览器端）</span>
+      </div>
+    </footer>
+
+    <!-- Markdown + sanitizer (CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js"></script>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,132 @@
+name: deploy-frontend-swa
+
+on:
+  workflow_dispatch:
+    inputs:
+      swa_name:
+        description: "Static Web App name (optional, leave empty to auto-generate)"
+        required: false
+      resource_group:
+        description: "Azure resource group (default uses AZURE_RESOURCE_GROUP repo variable)"
+        required: false
+      location:
+        description: "Azure region for create (only used if SWA doesn't exist)"
+        required: false
+        default: "eastasia"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      swa_name: ${{ steps.show_swa.outputs.swa_name }}
+      swa_url: ${{ steps.show_swa.outputs.swa_url }}
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP || inputs.resource_group }}
+      SWA_NAME: ${{ inputs.swa_name }}
+      SWA_LOCATION: ${{ inputs.location }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group input
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${AZURE_RESOURCE_GROUP}" ]]; then
+            echo "AZURE_RESOURCE_GROUP is required. Set repo variable AZURE_RESOURCE_GROUP or pass workflow input 'resource_group'." >&2
+            exit 1
+          fi
+
+      - name: Resolve SWA name
+        id: resolve_name
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${SWA_NAME:-}"
+          if [[ -z "$name" ]]; then
+            suffix=$(date +%y%m%d%H%M%S)
+            rand=$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')
+            name="swa-gcr-ai-tour-${suffix}-${rand}"
+          fi
+          echo "Resolved SWA name: $name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Create SWA if missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${{ steps.resolve_name.outputs.name }}"
+          if az staticwebapp show --name "$name" --resource-group "${AZURE_RESOURCE_GROUP}" >/dev/null 2>&1; then
+            echo "Static Web App exists: $name"
+          else
+            echo "Creating Static Web App: $name"
+            az staticwebapp create \
+              --name "$name" \
+              --resource-group "${AZURE_RESOURCE_GROUP}" \
+              --location "${SWA_LOCATION}" \
+              --source "${GITHUB_REPOSITORY}" \
+              --branch "${GITHUB_REF_NAME}" \
+              --app-location "frontend" \
+              --output-location ""
+          fi
+
+      - name: Show SWA name and URL
+        id: show_swa
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${{ steps.resolve_name.outputs.name }}"
+          url=$(az staticwebapp show --name "$name" --resource-group "${AZURE_RESOURCE_GROUP}" --query defaultHostname -o tsv)
+          if [[ -z "$url" ]]; then
+            echo "Failed to resolve SWA URL" >&2
+            exit 1
+          fi
+          full_url="https://${url}"
+          echo "SWA_NAME=$name"
+          echo "SWA_URL=$full_url"
+          echo "swa_name=$name" >> "$GITHUB_OUTPUT"
+          echo "swa_url=$full_url" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Static Web App";
+            echo "";
+            echo "- Name: $name";
+            echo "- URL: $full_url";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Get SWA deployment token
+        id: get_token
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${{ steps.resolve_name.outputs.name }}"
+          token=$(az staticwebapp secrets list --name "$name" --resource-group "${AZURE_RESOURCE_GROUP}" --query properties.apiKey -o tsv)
+          if [[ -z "$token" ]]; then
+            echo "Failed to retrieve SWA deployment token" >&2
+            exit 1
+          fi
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy frontend
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.get_token.outputs.token }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: "upload"
+          app_location: "frontend"
+          output_location: ""
+          api_location: ""

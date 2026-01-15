@@ -7,6 +7,8 @@ Param(
   [string]$SubscriptionId = "",
   [string]$TenantId = "",
   [string]$Role = "Cognitive Services User",
+  [switch]$EnableSwa,
+  [string]$SwaRole = "",
   [switch]$ConfigureGitHub,
   [string]$GitHubRepo = "",
   [string]$AiProjectEndpoint = "",
@@ -83,6 +85,7 @@ Write-Info "== Azure =="
 Write-Info "subscription: $SubscriptionId"
 Write-Info "tenant: $TenantId"
 Write-Info "scope: $scope"
+Write-Info "enable-swa: $EnableSwa"
 Write-Info ""
 
 # Create or reuse app registration
@@ -141,6 +144,39 @@ if ($hasRole -eq "0") {
   Write-Info "Role assignment already exists: '$Role' on $scope"
 }
 
+if ($EnableSwa) {
+  if (-not [string]::IsNullOrWhiteSpace($SwaRole)) {
+    $swaRole = $SwaRole
+  } else {
+    $swaRole = $null
+    $candidates = @("Website Contributor", "Static Web App Contributor", "Static Web Apps Contributor", "Contributor")
+    foreach ($candidate in $candidates) {
+      try {
+        $found = (az role definition list --name $candidate --query "[].name" -o tsv 2>$null).Trim()
+      } catch {
+        $found = ""
+      }
+      if ($found -eq $candidate) {
+        $swaRole = $candidate
+        break
+      }
+    }
+    if ([string]::IsNullOrWhiteSpace($swaRole)) {
+      $swaRole = "Contributor"
+    }
+  }
+
+  Write-Info "SWA role: $swaRole"
+  $hasSwaRole = (az role assignment list --assignee $appId --scope $scope --query "[?roleDefinitionName=='$swaRole'] | length(@)" -o tsv 2>$null).Trim()
+  if ([string]::IsNullOrWhiteSpace($hasSwaRole)) { $hasSwaRole = "0" }
+  if ($hasSwaRole -eq "0") {
+    Write-Info "Creating role assignment: '$swaRole' on $scope"
+    az role assignment create --assignee $appId --role $swaRole --scope $scope -o none
+  } else {
+    Write-Info "Role assignment already exists: '$swaRole' on $scope"
+  }
+}
+
 Write-Info ""
 if ($ConfigureGitHub) {
   if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
@@ -158,6 +194,10 @@ if ($ConfigureGitHub) {
   gh variable set -R $GitHubRepo AZURE_TENANT_ID -b $TenantId | Out-Null
   gh variable set -R $GitHubRepo AZURE_SUBSCRIPTION_ID -b $SubscriptionId | Out-Null
 
+  if (-not [string]::IsNullOrWhiteSpace($ResourceGroup)) {
+    gh variable set -R $GitHubRepo AZURE_RESOURCE_GROUP -b $ResourceGroup | Out-Null
+  }
+
   if (-not [string]::IsNullOrWhiteSpace($AiProjectEndpoint)) {
     gh variable set -R $GitHubRepo AZURE_AI_PROJECT_ENDPOINT -b $AiProjectEndpoint | Out-Null
   }
@@ -171,6 +211,11 @@ if ($ConfigureGitHub) {
   Write-Info "AZURE_CLIENT_ID=$appId"
   Write-Info "AZURE_TENANT_ID=$TenantId"
   Write-Info "AZURE_SUBSCRIPTION_ID=$SubscriptionId"
+  if (-not [string]::IsNullOrWhiteSpace($ResourceGroup)) {
+    Write-Info "AZURE_RESOURCE_GROUP=$ResourceGroup"
+  } else {
+    Write-Info "AZURE_RESOURCE_GROUP=(NOT set; pass -ResourceGroup or set it manually)"
+  }
   if (-not [string]::IsNullOrWhiteSpace($AiProjectEndpoint)) {
     Write-Info "AZURE_AI_PROJECT_ENDPOINT=(set)"
   } else {

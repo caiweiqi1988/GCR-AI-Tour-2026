@@ -167,6 +167,7 @@ gh auth login
 ./scripts/setup_github_actions_oidc.sh \
   --branch main \
   --resource-group <your-rg> \
+  --enable-swa \
   --configure-github \
   --ai-project-endpoint "https://<your-foundry-resource>.services.ai.azure.com/api/projects/<your-project>"
 
@@ -183,6 +184,7 @@ gh auth login
 ./scripts/setup_github_actions_oidc.ps1 \
   -Branch main \
   -ResourceGroup <your-rg> \
+  -EnableSwa \
   -ConfigureGitHub \
   -AiProjectEndpoint "https://<your-foundry-resource>.services.ai.azure.com/api/projects/<your-project>"
 ```
@@ -191,7 +193,13 @@ gh auth login
 - 创建/复用 Entra App + Service Principal
 - 创建 Federated Credential（GitHub Actions OIDC，限定 `main` 分支）
 - 为该 SP 分配 RBAC（默认 `Cognitive Services User`，作用域默认建议用资源组）
+- （可选）为该 SP 分配 Static Web Apps 相关角色（当传入 `--enable-swa` / `-EnableSwa`）
+  - 脚本会优先使用 `Website Contributor`（官方内置角色），并自动回退到 `Contributor`
+  - 如需强制指定角色，可传 `--swa-role "<role name>"` / `-SwaRole "<role name>"`
 - 自动写入 GitHub Actions Variables（不需要 secrets）
+
+新增的 GitHub Actions Variables（用于 SWA 部署）：
+- `AZURE_RESOURCE_GROUP`（来自 `--resource-group` / `-ResourceGroup`）
 
 常见踩坑（会导致“没有自动写入 Variables”）：
 - 忘了加 `--configure-github` / `-ConfigureGitHub`：脚本会只打印“Next step: set GitHub Repository Variables …”的手工步骤。
@@ -209,6 +217,22 @@ gh auth login
 
 运行结束后：
 - GitHub → Actions → 进入该 run → Artifacts 下载 `report.md` 和完整 output
+
+### 4)（可选）手动部署前端到 Azure Static Web Apps
+
+本仓库已提供一个手动触发的 workflow：
+- `.github/workflows/deploy_frontend_swa.yml`
+
+使用方式：
+1. 打开 GitHub → Actions → 选择 `deploy-frontend-swa`
+2. 点击 “Run workflow”
+3. 只需填写 `swa_name`（可留空，自动生成随机名称）
+  - 如已通过 OIDC 脚本写入 `AZURE_RESOURCE_GROUP`，则无需再填写 `resource_group`
+
+workflow 会：
+- 若 SWA 不存在则创建（同一个 resource group）
+- 发布 `frontend/` 到 SWA
+- 在 Actions summary 中输出 SWA 名称与 URL（同时暴露 workflow outputs）
 
 ## 备选路径：不用 GitHub CLI（仍然尽量少点 Portal）
 

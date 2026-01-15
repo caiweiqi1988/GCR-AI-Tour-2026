@@ -26,6 +26,14 @@ Examples:
     --owner yourname --repo yourrepo --branch main \
     --resource-group <rg>
 
+  # Also grant Static Web Apps permissions (same resource group):
+  ./scripts/setup_github_actions_oidc.sh \
+    --resource-group <rg> --enable-swa
+
+  # Override SWA role name (optional):
+  ./scripts/setup_github_actions_oidc.sh \
+    --resource-group <rg> --enable-swa --swa-role "Contributor"
+
 Notes:
 - For labs, we recommend using GitHub Repository Variables (vars) instead of Secrets.
 - By default, the federated credential is limited to ref:refs/heads/<branch>.
@@ -84,6 +92,8 @@ RESOURCE_GROUP=""
 SUBSCRIPTION_ID=""
 TENANT_ID=""
 ROLE_NAME="Cognitive Services User"
+SWA_ROLE_OVERRIDE=""
+ENABLE_SWA="false"
 CONFIGURE_GITHUB="false"
 GITHUB_REPO=""
 AI_PROJECT_ENDPOINT=""
@@ -111,6 +121,10 @@ while [[ $# -gt 0 ]]; do
       TENANT_ID="$2"; shift 2 ;;
     --role)
       ROLE_NAME="$2"; shift 2 ;;
+    --enable-swa)
+      ENABLE_SWA="true"; shift 1 ;;
+    --swa-role)
+      SWA_ROLE_OVERRIDE="$2"; shift 2 ;;
     --configure-github)
       CONFIGURE_GITHUB="true"; shift 1 ;;
     --github-repo)
@@ -204,6 +218,7 @@ echo "== Azure =="
 echo "subscription: ${SUBSCRIPTION_ID}"
 echo "tenant: ${TENANT_ID}"
 echo "scope: ${SCOPE}"
+echo "enable-swa: ${ENABLE_SWA}"
 echo
 
 # Create or reuse app registration
@@ -256,6 +271,33 @@ else
   echo "Role assignment already exists: '${ROLE_NAME}' on ${SCOPE}"
 fi
 
+if [[ "$ENABLE_SWA" == "true" ]]; then
+  if [[ -n "$SWA_ROLE_OVERRIDE" ]]; then
+    SWA_ROLE_NAME="$SWA_ROLE_OVERRIDE"
+  else
+    SWA_ROLE_NAME=""
+    for candidate in "Website Contributor" "Static Web App Contributor" "Static Web Apps Contributor" "Contributor"; do
+      found=$(az role definition list --name "$candidate" --query "[].name" -o tsv 2>/dev/null | head -n 1 || true)
+      if [[ "$found" == "$candidate" ]]; then
+        SWA_ROLE_NAME="$candidate"
+        break
+      fi
+    done
+    if [[ -z "$SWA_ROLE_NAME" ]]; then
+      SWA_ROLE_NAME="Contributor"
+    fi
+  fi
+
+  echo "SWA role: ${SWA_ROLE_NAME}"
+  HAS_SWA_ROLE=$(az role assignment list --assignee "$APP_ID" --scope "$SCOPE" --query "[?roleDefinitionName=='${SWA_ROLE_NAME}'] | length(@)" -o tsv || echo 0)
+  if [[ "$HAS_SWA_ROLE" == "0" ]]; then
+    echo "Creating role assignment: '${SWA_ROLE_NAME}' on ${SCOPE}"
+    az role assignment create --assignee "$APP_ID" --role "$SWA_ROLE_NAME" --scope "$SCOPE" -o none
+  else
+    echo "Role assignment already exists: '${SWA_ROLE_NAME}' on ${SCOPE}"
+  fi
+fi
+
 if [[ "$CONFIGURE_GITHUB" == "true" ]]; then
   if ! command -v gh >/dev/null 2>&1; then
     echo
@@ -277,6 +319,10 @@ if [[ "$CONFIGURE_GITHUB" == "true" ]]; then
   gh variable set -R "$GITHUB_REPO" AZURE_TENANT_ID -b "$TENANT_ID" >/dev/null
   gh variable set -R "$GITHUB_REPO" AZURE_SUBSCRIPTION_ID -b "$SUBSCRIPTION_ID" >/dev/null
 
+  if [[ -n "$RESOURCE_GROUP" ]]; then
+    gh variable set -R "$GITHUB_REPO" AZURE_RESOURCE_GROUP -b "$RESOURCE_GROUP" >/dev/null
+  fi
+
   if [[ -n "$AI_PROJECT_ENDPOINT" ]]; then
     gh variable set -R "$GITHUB_REPO" AZURE_AI_PROJECT_ENDPOINT -b "$AI_PROJECT_ENDPOINT" >/dev/null
   fi
@@ -290,6 +336,11 @@ if [[ "$CONFIGURE_GITHUB" == "true" ]]; then
   echo "AZURE_CLIENT_ID=${APP_ID}"
   echo "AZURE_TENANT_ID=${TENANT_ID}"
   echo "AZURE_SUBSCRIPTION_ID=${SUBSCRIPTION_ID}"
+  if [[ -n "$RESOURCE_GROUP" ]]; then
+    echo "AZURE_RESOURCE_GROUP=${RESOURCE_GROUP}"
+  else
+    echo "AZURE_RESOURCE_GROUP=(NOT set; pass --resource-group or set it manually)"
+  fi
   if [[ -n "$AI_PROJECT_ENDPOINT" ]]; then
     echo "AZURE_AI_PROJECT_ENDPOINT=(set)"
   else
