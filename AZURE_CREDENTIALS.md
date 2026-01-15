@@ -5,23 +5,179 @@
 ## 目录
 
 - [认证方法概览](#认证方法概览)
-- [方法 1: Azure CLI (推荐)](#方法-1-azure-cli-推荐)
-- [方法 2: 环境变量](#方法-2-环境变量)
-- [方法 3: Azure Key Vault](#方法-3-azure-key-vault)
+- [方法 1: Managed Identity (推荐生产环境)](#方法-1-managed-identity-推荐生产环境)
+- [方法 2: Azure CLI (推荐本地开发)](#方法-2-azure-cli-推荐本地开发)
+- [方法 3: 环境变量](#方法-3-环境变量)
+- [方法 4: Azure Key Vault](#方法-4-azure-key-vault)
 - [获取所需信息](#获取所需信息)
 - [故障排查](#故障排查)
 
 ## 认证方法概览
 
-本项目支持三种 Azure 认证方法：
+本项目支持四种 Azure 认证方法：
 
 | 方法 | 适用场景 | 安全性 | 配置难度 |
 |------|---------|--------|---------|
+| **Managed Identity** | **Azure VM/容器/App Service** | **最高** | **低** |
 | Azure CLI | 本地开发 | 高 | 低 |
 | 环境变量 | CI/CD、容器 | 中 | 低 |
-| Azure Key Vault | 生产环境 | 高 | 中 |
+| Azure Key Vault | 生产环境密钥管理 | 高 | 中 |
 
-## 方法 1: Azure CLI (推荐)
+> **⚠️ 重要**: 对于生产部署到 Azure，**强烈推荐使用 Managed Identity**。它提供最高安全性，无需管理密钥。
+
+## 方法 1: Managed Identity (推荐生产环境)
+
+**适用于**: Azure VM、Azure Container Instances、Azure App Service、Azure Kubernetes Service (AKS)、Azure Functions
+
+Managed Identity 允许 Azure 资源自动获取 Azure AD 令牌，无需在代码中存储凭据。
+
+### 优点
+
+- ✅ **最安全** - 无需存储或管理密钥
+- ✅ **自动轮换** - Azure 自动管理凭据生命周期
+- ✅ **零配置** - 在 Azure 环境中自动检测和使用
+- ✅ **审计友好** - 所有访问都通过 Azure AD 记录
+- ✅ **符合合规要求** - 满足企业安全标准
+
+### 类型
+
+#### System-Assigned Managed Identity (系统分配)
+
+自动创建并绑定到单个 Azure 资源。资源删除时自动删除。
+
+#### User-Assigned Managed Identity (用户分配)
+
+独立创建，可分配给多个 Azure 资源。资源删除后仍然存在。
+
+### 步骤 1: 启用 Managed Identity
+
+#### Azure VM
+
+```bash
+# 启用系统分配的托管标识
+az vm identity assign \
+    --name "your-vm-name" \
+    --resource-group "your-resource-group"
+
+# 或创建并分配用户分配的托管标识
+az identity create \
+    --name "social-insight-identity" \
+    --resource-group "your-resource-group"
+
+az vm identity assign \
+    --name "your-vm-name" \
+    --resource-group "your-resource-group" \
+    --identities "/subscriptions/{sub}/resourcegroups/{rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/social-insight-identity"
+```
+
+#### Azure Container Instances
+
+```bash
+# 系统分配
+az container create \
+    --name "social-insight-container" \
+    --resource-group "your-resource-group" \
+    --image "your-image" \
+    --assign-identity
+
+# 用户分配
+az container create \
+    --name "social-insight-container" \
+    --resource-group "your-resource-group" \
+    --image "your-image" \
+    --assign-identity "/subscriptions/{sub}/resourcegroups/{rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/social-insight-identity"
+```
+
+#### Azure App Service
+
+```bash
+# 系统分配
+az webapp identity assign \
+    --name "your-app-name" \
+    --resource-group "your-resource-group"
+
+# 用户分配
+az webapp identity assign \
+    --name "your-app-name" \
+    --resource-group "your-resource-group" \
+    --identities "/subscriptions/{sub}/resourcegroups/{rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/social-insight-identity"
+```
+
+### 步骤 2: 授予权限
+
+Managed Identity 需要访问 Azure AI Foundry 的权限：
+
+```bash
+# 获取托管标识的 Principal ID
+# 对于系统分配的标识:
+PRINCIPAL_ID=$(az vm show --name "your-vm-name" --resource-group "your-resource-group" --query identity.principalId -o tsv)
+
+# 对于用户分配的标识:
+PRINCIPAL_ID=$(az identity show --name "social-insight-identity" --resource-group "your-resource-group" --query principalId -o tsv)
+
+# 授予 Cognitive Services User 角色
+az role assignment create \
+    --assignee $PRINCIPAL_ID \
+    --role "Cognitive Services User" \
+    --scope "/subscriptions/{subscription-id}/resourceGroups/{resource-group}/providers/Microsoft.CognitiveServices/accounts/{ai-foundry-resource}"
+
+# 或授予更广泛的访问权限（整个资源组）
+az role assignment create \
+    --assignee $PRINCIPAL_ID \
+    --role "Cognitive Services User" \
+    --scope "/subscriptions/{subscription-id}/resourceGroups/{resource-group}"
+```
+
+### 步骤 3: 配置应用
+
+在 Azure 资源中设置环境变量：
+
+```bash
+# 必需：Azure AI Foundry 端点
+AZURE_AI_PROJECT_ENDPOINT=https://your-project.api.azureml.ms
+
+# 必需：模型部署名称
+AZURE_AI_MODEL_DEPLOYMENT_NAME=gpt-4
+
+# 可选：强制使用托管标识（通常自动检测）
+USE_MANAGED_IDENTITY=true
+
+# 可选：用户分配的托管标识的 Client ID
+AZURE_CLIENT_ID=your-user-assigned-identity-client-id
+```
+
+### 步骤 4: 部署和测试
+
+1. 部署应用到 Azure 资源
+2. 应用会自动使用 Managed Identity 进行身份验证
+3. 无需 `az login` 或存储密钥
+
+```bash
+# 在 Azure VM 中运行测试
+./scripts/test_e2e.sh azure
+```
+
+### 验证 Managed Identity
+
+检查 Managed Identity 是否正常工作：
+
+```bash
+# 在 Azure 资源中运行此命令
+curl -H "Metadata:true" "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://cognitiveservices.azure.com/"
+```
+
+如果返回访问令牌，说明 Managed Identity 配置正确。
+
+### 故障排查
+
+**问题**: "ManagedIdentityCredential authentication failed"
+
+**解决方案**:
+1. 确认已启用 Managed Identity
+2. 验证权限分配正确
+3. 检查 Azure 资源是否在正确的订阅/资源组中
+
+## 方法 2: Azure CLI (推荐本地开发)
 
 **适用于**: 本地开发和测试
 
