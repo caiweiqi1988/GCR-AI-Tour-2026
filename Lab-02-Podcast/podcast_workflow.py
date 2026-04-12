@@ -1,197 +1,202 @@
 """
-Microsoft Foundry Agent Workflow - Podcast Generator
-生成播客内容的工作流脚本
+Microsoft Agent Framework Workflow - Podcast Generator
+使用 GitHub Copilot 作为 LLM 提供方，结合 MAF Workflow 进行编排
+
+工作流拓扑（顺序执行）：
+    PodcastSearchExecutor -> PodcastContentExecutor -> PodcastScriptExecutor
+    (生成大纲)              (生成脚本草稿)             (润色并保存)
+
+环境变量（可选）：
+- GITHUB_COPILOT_CLI_PATH - Copilot CLI 可执行文件路径
+- GITHUB_COPILOT_MODEL    - 使用的模型（如 "gpt-5", "claude-sonnet-4"）
+- GITHUB_COPILOT_TIMEOUT  - 请求超时（秒）
 """
 
+import asyncio
 import argparse
-import os
-import json
 import uuid
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import cast
+from typing_extensions import Never
 
-from azure.identity import DefaultAzureCredential
-from azure.ai.projects import AIProjectClient
-from azure.ai.projects.models import (
-    AgentReference,
-    ResponseStreamEventType,
-    WorkflowAgentDefinition,
-    ItemType
+from agent_framework import (
+    Executor,
+    Workflow,
+    WorkflowBuilder,
+    WorkflowContext,
+    handler,
 )
-from openai.types.responses.response_input_param import ResponseInputParam
-
-
-def safe_get_agent_name_from_item(item):
-    """从 item 中安全获取 agent 名称"""
-    # 1) workflow_action：一般用 action_id 当作"名字"
-    item_type = getattr(item, "type", None) if not isinstance(item, dict) else item.get("type")
-    if item_type == "workflow_action":
-        return getattr(item, "action_id", None) if not isinstance(item, dict) else item.get("action_id")
-
-    # 2) message：从 created_by.agent.name 取
-    if isinstance(item, dict):
-        return (item.get("created_by") or {}).get("agent", {}).get("name")
-
-    created_by = getattr(item, "created_by", None) or {}
-    if isinstance(created_by, dict):
-        return (created_by.get("agent") or {}).get("name")
-
-    # created_by 也可能是对象
-    agent = getattr(created_by, "agent", None)
-    return getattr(agent, "name", None)
-
-
-def extract_text_from_response(response):
-    """从响应中提取文本内容"""
-    texts = []
-    for output_item in response.output:
-        # 检查是否是 message 类型
-        if getattr(output_item, 'type', None) == 'message':
-            content = getattr(output_item, 'content', [])
-            if content:
-                for content_part in content:
-                    # 检查是否是 output_text 类型
-                    if getattr(content_part, 'type', None) == 'output_text':
-                        text = getattr(content_part, 'text', '')
-                        if text:
-                            texts.append(text)
-    return texts
+from agent_framework.github import GitHubCopilotAgent
+from dotenv import load_dotenv
 
 
 def save_podcast_content(content: str, output_dir: str = "podcast") -> str:
     """保存播客内容到文件"""
     podcast_dir = Path(output_dir)
     podcast_dir.mkdir(exist_ok=True)
-    
-    file_uuid = str(uuid.uuid4())[:8]  # 使用前8位UUID
+
+    file_uuid = str(uuid.uuid4())[:8]
     filename = f"2p_podcast_{file_uuid}.txt"
     file_path = podcast_dir / filename
-    
+
     file_path.write_text(content, encoding="utf-8")
     print(f"内容已保存到文件: {file_path}")
     return str(file_path)
 
 
-def run_podcast_workflow(
-    endpoint: str,
-    workflow_yaml_path: str,
-    input_topic: str,
-    workflow_name: str = "podcast-orch-workflow"
-):
-    """
-    运行播客生成工作流
-    
-    Args:
-        endpoint: Azure AI Foundry 项目端点
-        workflow_yaml_path: 工作流 YAML 文件路径
-        input_topic: 播客主题
-        workflow_name: 工作流名称
-    """
-    # print the azure credentail like client id ,tenant id, secret
-    print(f"AZURE_CLIENT_ID: {os.getenv('AZURE_CLIENT_ID')}")
-    print(f"AZURE_CLIENT_SECRET: {os.getenv('AZURE_CLIENT_SECRET')}")
-    print(f"AZURE_TENANT_ID: {os.getenv('AZURE_TENANT_ID')}")
-    print(f"AZURE_SUBSCRIPTION_ID: {os.getenv('AZURE_SUBSCRIPTION_ID')}")
+# ---------------------------------------------------------------------------
+# Executor 定义 — 每个 Executor 封装一个 GitHubCopilotAgent 调用
+# ---------------------------------------------------------------------------
 
-    content = ""
-    with (
-        DefaultAzureCredential() as credential,
-        AIProjectClient(endpoint=endpoint, credential=credential) as project_client,
-        project_client.get_openai_client() as openai_client,
-    ):
-        
-        print(credential.get_token("https://cognitiveservices.azure.com/.default"))
-        # 从文件读取 workflow_yaml
-        with open(workflow_yaml_path, "r", encoding="utf-8") as f:
-            workflow_yaml = f.read()
 
-        workflow = project_client.agents.create_version(
-            agent_name=workflow_name,
-            definition=WorkflowAgentDefinition(workflow=workflow_yaml),
+class PodcastSearchExecutor(Executor):
+    """播客搜索 Agent：根据用户主题生成播客大纲"""
+
+    def __init__(self):
+        super().__init__(id="podcast-search-agent")
+
+    @handler
+    async def generate_outline(self, topic: str, ctx: WorkflowContext[str]) -> None:
+        agent = GitHubCopilotAgent(
+            instructions=(
+                "你是一位专业的播客内容策划人。根据用户提供的主题，"
+                "生成一份详细的播客大纲，包括：\n"
+                "1. 开场引入\n"
+                "2. 3-5 个核心讨论点\n"
+                "3. 结尾总结\n"
+                "请用中文回复。"
+            ),
+            name="podcast-search-agent",
         )
+        async with agent:
+            result = await agent.run(f"请根据这个主题生成播客大纲：{topic}")
 
-        print(f"Agent created (id: {workflow.id}, name: {workflow.name}, version: {workflow.version})")
+        outline = str(result)
+        print(f"\n[podcast-search-agent] 播客大纲已生成")
+        await ctx.send_message(outline)
 
-        conversation = openai_client.conversations.create()
-        print(f"Created conversation (id: {conversation.id})")
 
-        input_list: ResponseInputParam = [input_topic, "Yes"]
+class PodcastContentExecutor(Executor):
+    """播客内容 Agent：根据大纲生成两人对话风格播客脚本"""
 
-        stream = openai_client.responses.create(
-            conversation=conversation.id,
-            extra_body={"agent": {"name": workflow.name, "type": "agent_reference"}},
-            input=input_list[0],
-            stream=True,
-            metadata={"x-ms-debug-mode-enabled": "1"},
+    def __init__(self):
+        super().__init__(id="podcast-content-agent")
+
+    @handler
+    async def generate_script(self, outline: str, ctx: WorkflowContext[str]) -> None:
+        agent = GitHubCopilotAgent(
+            instructions=(
+                "你是一位专业的播客内容撰稿人。根据提供的播客大纲，"
+                "撰写一份完整的两人对话风格播客脚本。\n"
+                "角色分别为 Host（主持人）和 Guest（嘉宾），\n"
+                "对话应自然流畅、内容深入、生动有趣。\n"
+                "请用中文回复。"
+            ),
+            name="podcast-content-agent",
         )
+        async with agent:
+            result = await agent.run(
+                f"请根据以下播客大纲撰写完整的播客脚本：\n\n{outline}"
+            )
 
-        status = 0
-        for event in stream:
-            if event.type == ResponseStreamEventType.RESPONSE_OUTPUT_ITEM_ADDED:
-                name = safe_get_agent_name_from_item(event.item)
-                if getattr(event.item, "type", None) == "message" and name == "podcast-search-agent":
-                    status = 0
-                elif getattr(event.item, "type", None) == "message" and name == "podcast-content-agent":
-                    status = 1
-                else:
-                    status = 2
+        content = str(result)
+        print(f"\n[podcast-content-agent] 播客脚本草稿已生成")
+        await ctx.send_message(content)
 
-            if event.type == ResponseStreamEventType.RESPONSE_OUTPUT_TEXT_DONE:
-                if status == 1:
-                    content = event.text
-                    save_podcast_content(content)
 
-                if "Yes" in event.text and status == 2:
-                    response = openai_client.responses.create(
-                        conversation=conversation.id,
-                        extra_body={"agent": {"name": workflow.name, "type": "agent_reference"}},
-                        input="Yes",
-                        stream=False,
-                        metadata={"x-ms-debug-mode-enabled": "1"},
-                    )
+class PodcastScriptExecutor(Executor):
+    """播客脚本 Agent：润色并保存最终播客脚本"""
 
-                    print("User confirmed saving the script. Exiting workflow.")
-                    break
-    
-    return content
+    def __init__(self):
+        super().__init__(id="podcast-script-agent")
+
+    @handler
+    async def finalize_script(self, draft: str, ctx: WorkflowContext[Never, str]) -> None:
+        agent = GitHubCopilotAgent(
+            instructions=(
+                "你是一位播客脚本编辑。对提供的播客脚本草稿进行最终润色，"
+                "确保对话自然流畅、内容结构清晰、开场和结尾完整。\n"
+                "请直接输出最终版本的脚本，不要添加额外说明。请用中文回复。"
+            ),
+            name="podcast-script-agent",
+        )
+        async with agent:
+            result = await agent.run(
+                f"请润色以下播客脚本并输出最终版本：\n\n{draft}"
+            )
+
+        final_script = str(result)
+        save_podcast_content(final_script)
+        print(f"\n[podcast-script-agent] 最终播客脚本已保存")
+        await ctx.yield_output(final_script)
+
+
+# ---------------------------------------------------------------------------
+# Workflow 构建与运行
+# ---------------------------------------------------------------------------
+
+
+def create_podcast_workflow() -> Workflow:
+    """
+    创建播客生成工作流
+
+    使用 WorkflowBuilder 将三个 Executor 按顺序串联：
+        search -> content -> script
+    """
+    search = PodcastSearchExecutor()
+    content = PodcastContentExecutor()
+    script = PodcastScriptExecutor()
+
+    return (
+        WorkflowBuilder(start_executor=search)
+        .add_edge(search, content)
+        .add_edge(content, script)
+        .build()
+    )
+
+
+async def run_podcast_workflow(input_topic: str) -> str:
+    """运行播客生成工作流并通过流式事件输出进度"""
+    workflow = create_podcast_workflow()
+
+    print(f"开始生成播客内容，主题: {input_topic}")
+    print("=" * 60)
+
+    outputs: list[str] = []
+    async for event in workflow.run(input_topic, stream=True):
+        if event.type == "executor_invoked":
+            executor_id = getattr(event, "executor_id", "")
+            print(f"  -> 正在执行: {executor_id}")
+        elif event.type == "executor_completed":
+            executor_id = getattr(event, "executor_id", "")
+            print(f"  <- 完成执行: {executor_id}")
+        elif event.type == "output":
+            outputs.append(cast(str, event.data))
+
+    print("=" * 60)
+    print("工作流执行完成！")
+    return outputs[0] if outputs else ""
 
 
 def main():
     """主函数"""
-    # 解析命令行参数
-    parser = argparse.ArgumentParser(description="生成播客内容的工作流脚本")
+    parser = argparse.ArgumentParser(
+        description="生成播客内容的工作流脚本（GitHub Copilot + MAF Workflow）"
+    )
     parser.add_argument(
         "--topic", "-t",
         type=str,
         required=True,
-        help="播客主题"
-    )
-    parser.add_argument(
-        "--endpoint", "-e",
-        type=str,
-        default="https://kinfey-ai-foundry.services.ai.azure.com/api/projects/kinfey-ai-foundry-proj",
-        help="Azure AI Foundry 项目端点"
-    )
-    parser.add_argument(
-        "--yaml", "-y",
-        type=str,
-        default="./yaml/yaml_c3e43833.yaml",
-        help="工作流 YAML 文件路径"
+        help="播客主题",
     )
     args = parser.parse_args()
-    
-    # 加载环境变量
+
     load_dotenv(".env")
-    
-    # 运行工作流
-    result = run_podcast_workflow(
-        endpoint=args.endpoint,
-        workflow_yaml_path=args.yaml,
-        input_topic=args.topic
-    )
-    
+
+    result = asyncio.run(run_podcast_workflow(input_topic=args.topic))
+
     if result:
-        print("播客内容生成完成!")
+        print("\n播客内容生成完成!")
 
 
 if __name__ == "__main__":

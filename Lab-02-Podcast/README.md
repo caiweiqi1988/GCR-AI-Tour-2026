@@ -1,20 +1,39 @@
 # 播客工作流
 
-基于 Microsoft Azure AI 与 GitHub Actions 的自动化播客生成系统。该工作流通过智能 Agent 自动生成关于 AI 与技术话题的播客内容。
+基于 Microsoft Agent Framework (MAF) 与 GitHub Copilot 的自动化播客生成系统。该工作流通过 MAF Workflow 编排三个 Agent，使用 GitHub Copilot 作为 LLM 提供方，自动生成关于 AI 与技术话题的播客内容。
 
 ## 功能特性
 
-- 🤖 **AI 驱动生成**：利用 Azure AI Projects 与 Agent 工作流，生成自然流畅的播客对话内容
-- ⏰ **自动化调度**：GitHub Actions 每日自动触发，持续生成播客内容
-- 📝 **话题管理**：基于纯文本的话题队列管理机制
-- 🔄 **持续发布**：自动提交并推送生成的内容到仓库
+- **GitHub Copilot 驱动**：使用 `GitHubCopilotAgent` 作为 LLM 提供方，无需 Azure AI Foundry 资源
+- **MAF Workflow 编排**：使用 `WorkflowBuilder` 构建顺序执行的多 Agent 工作流
+- **三 Agent 串联**：搜索生成大纲 → 内容生成脚本 → 润色并保存最终脚本
+- **流式事件输出**：实时输出工作流执行进度
+- **话题管理**：基于纯文本的话题队列管理机制
+
+## 架构说明
+
+```
+WorkflowBuilder 顺序工作流：
+
+┌─────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
+│ PodcastSearchExecutor│───▶│PodcastContentExecutor│───▶│PodcastScriptExecutor │
+│  (podcast-search-   │    │  (podcast-content-   │    │  (podcast-script-    │
+│   agent)             │    │   agent)              │    │   agent)              │
+│                     │    │                      │    │                      │
+│ 根据主题生成大纲     │    │ 根据大纲生成脚本草稿  │    │ 润色并保存最终脚本    │
+└─────────────────────┘    └──────────────────────┘    └──────────────────────┘
+         ▲                                                        │
+         │                                                        ▼
+    用户输入主题                                          yield_output(最终脚本)
+```
+
+每个 Executor 内部封装一个 `GitHubCopilotAgent` 实例，通过 `ctx.send_message()` 在 Executor 之间传递数据，最终由 `ctx.yield_output()` 输出工作流结果。
 
 ## 前置条件
 
 - Python 3.11+
-- Azure AI Projects 订阅
-- 已启用 Actions 的 GitHub 仓库
-- Azure 凭据（租户 ID、客户端 ID、客户端密钥）
+- GitHub Copilot CLI：已安装并完成认证（通过 `gh auth login`）
+- GitHub Copilot 订阅：有效的 GitHub Copilot 订阅
 
 ## 安装步骤
 
@@ -26,35 +45,27 @@ cd podcast_workflow
 
 2. 安装依赖：
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt --pre
 ```
 
-3. 配置环境变量：
+3. 配置环境变量（可选）：
 ```bash
 cp .env.example .env
-# 编辑 .env 文件，填写你的 Azure 凭据
+# 编辑 .env 文件，配置 GitHub Copilot 相关变量
 ```
 
 ## 配置说明
 
-### Azure 配置
+### GitHub Copilot 配置
 
-1. 在 [Azure AI Foundry](https://ai.azure.com) 中创建 Azure AI 项目
-2. 创建 Microsoft Entra（Azure AD）服务主体：
-   ```bash
-   az ad sp create-for-rbac --name "podcast-workflow-sp" --role Contributor --scopes /subscriptions/{subscription-id}
-   ```
-3. 在 GitHub 仓库中添加 `AZURE_CREDENTIALS` Secret（Settings → Secrets and variables → Actions），格式如下：
-   ```json
-   {
-     "clientId": "your-application-client-id",
-     "clientSecret": "your-client-secret",
-     "tenantId": "your-tenant-id",
-     "subscriptionId": "your-subscription-id"
-   }
-   ```
-   
-   **注意**：`clientId` 必须是 Microsoft Entra 应用注册中的应用程序（客户端）ID。
+以下环境变量可在 `.env` 中配置：
+
+| 变量名 | 说明 | 默认值 |
+|---|---|---|
+| `GITHUB_COPILOT_CLI_PATH` | Copilot CLI 可执行文件路径 | `copilot` |
+| `GITHUB_COPILOT_MODEL` | 使用的模型（如 `gpt-5.4`） | `gpt-5.4` |
+| `GITHUB_COPILOT_TIMEOUT` | 请求超时（秒） | `60` |
+| `GITHUB_COPILOT_LOG_LEVEL` | CLI 日志级别 | `info` |
 
 ### 话题管理
 
@@ -67,46 +78,29 @@ cp .env.example .env
 Qwen 是最全面的开源模型吗？
 ```
 
-GitHub Action 每天处理一个话题，处理完成后自动从队列中移除。
-
 ## 使用方式
 
-### 手动执行
-
-指定话题手动运行工作流：
+指定话题运行工作流：
 ```bash
 python podcast_workflow.py -t "你的播客话题"
 ```
 
-### 自动执行
-
-GitHub Action 每 24 小时自动运行一次（UTC 00:00 / 北京时间 08:00）。
-
-也可手动触发：
-1. 进入 GitHub 仓库的「Actions」标签页
-2. 选择「Daily Podcast Generator」
-3. 点击「Run workflow」
-
 ## 工作流程
 
-1. **话题选取**：读取 `topic/title.txt` 的第一行
-2. **内容生成**：执行 AI Agent 工作流，生成播客内容
-3. **输出存储**：将生成的播客保存至 `podcast/` 目录
-4. **队列更新**：从 `topic/title.txt` 中移除已处理的话题
-5. **Git 提交**：自动提交并推送变更到仓库
+1. **大纲生成**：`PodcastSearchExecutor` 调用 GitHub Copilot 生成播客大纲
+2. **脚本撰写**：`PodcastContentExecutor` 调用 GitHub Copilot 生成两人对话风格脚本
+3. **润色保存**：`PodcastScriptExecutor` 调用 GitHub Copilot 润色脚本并保存至 `podcast/` 目录
 
 ## 项目结构
 
 ```
-podcast_workflow/
-├── .github/
-│   └── workflows/
-│       └── daily-podcast.yml    # GitHub Actions 工作流配置
+Lab-02-Podcast/
+├── .env.example                  # 环境变量模板
 ├── podcast/                      # 生成的播客内容
+│   └── 2p_podcast_<uuid>.txt
 ├── topic/
 │   └── title.txt                # 话题队列
-├── yaml/                         # 工作流配置文件
-├── podcast_workflow.py          # 主工作流脚本
+├── podcast_workflow.py          # 主工作流脚本（MAF Workflow + GitHub Copilot）
 ├── requirements.txt             # Python 依赖
 └── README.md
 ```
@@ -115,47 +109,44 @@ podcast_workflow/
 
 播客文件保存在 `podcast/` 目录下，以唯一标识符命名：
 - 格式：`2p_podcast_<uuid>.txt`
-- 内容：由 AI 生成的两位主持人围绕话题的对话内容
+- 内容：由 AI 生成的两位主持人（Host / Guest）围绕话题的对话内容
 
-## GitHub Actions 工作流说明
+## 关键技术
 
-每日工作流执行以下步骤：
-1. 检出仓库代码
-2. 配置 Python 环境
-3. 安装依赖
-4. 读取并处理一个话题
-5. 运行播客生成脚本
-6. 提交生成内容及更新后的话题列表
-7. 推送变更到仓库
+- **[Microsoft Agent Framework (MAF)](https://github.com/microsoft/agent-framework)**：提供 `Executor`、`WorkflowBuilder`、`WorkflowContext` 等核心抽象，用于构建多 Agent 工作流
+- **[GitHubCopilotAgent](https://github.com/microsoft/agent-framework/tree/main/python/samples/02-agents/providers/github_copilot)**：MAF 提供的 GitHub Copilot LLM 适配器，通过 Copilot CLI 调用模型
+- **Workflow 模式**：基于 MAF 的 `WorkflowBuilder` 构建顺序执行图，通过 `ctx.send_message()` 传递中间结果，`ctx.yield_output()` 产出最终结果
 
 ## 常见问题排查
 
-### 大文件错误
+### GitHub Copilot CLI
 
-如遇 GitHub 100 MB 文件大小限制报错，`.gitignore` 已配置排除大型媒体文件（`.mov`、`.mp4`、`.wav`、`.mp3` 等）。
+确保已安装 GitHub Copilot CLI 并完成认证：
+```bash
+# 检查 CLI 是否可用
+copilot --version
+
+# 如需指定 CLI 路径，设置环境变量
+export GITHUB_COPILOT_CLI_PATH=/path/to/copilot
+```
+
+### 超时问题
+
+如果生成长篇脚本时出现超时错误，可在 `.env` 中增大超时值：
+```
+GITHUB_COPILOT_TIMEOUT = 180
+```
 
 ### 认证问题
 
-请确认 GitHub Secrets 中的 Azure 凭据配置正确，且具备访问 Azure AI Projects 的必要权限。
-
-### 工作流失败
-
-请在 GitHub 的 Actions 标签页查看详细日志。常见原因：
-- Azure 凭据缺失或无效
-- 话题队列为空
-- API 速率限制
-
-## 贡献
-
-欢迎提交 Pull Request 参与贡献！
+确保 GitHub Copilot 订阅有效，且 CLI 已通过 `gh auth login` 认证。
 
 ## 许可证
 
-MIT License —— 欢迎将本项目用于你自己的播客生成需求。
+MIT License
 
 ## 致谢
 
 本项目基于以下技术构建：
-- [Azure AI Projects](https://learn.microsoft.com/azure/ai-studio/)
-- [Microsoft Foundry Agent Framework](https://learn.microsoft.com/azure/ai-studio/concepts/agents)
-- GitHub Actions
+- [Microsoft Agent Framework (MAF)](https://github.com/microsoft/agent-framework)
+- [GitHub Copilot](https://github.com/features/copilot)

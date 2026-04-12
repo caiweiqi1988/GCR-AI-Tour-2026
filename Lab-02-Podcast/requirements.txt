@@ -1,4 +1,4 @@
-azure-ai-projects==2.0.0b2
-azure-identity
+agent-framework
+agent-framework-orchestrations
+agent-framework-github-copilot
 python-dotenv
-openai
